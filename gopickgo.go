@@ -39,8 +39,14 @@ func main() {
 func findGo() (string, error) {
 	var cands []string
 	if mod, err := goModuleRoot(); err == nil {
-		toolGo := filepath.Join(mod, "tool", "go")
-		cands = append(cands, toolGo)
+		if strings.HasSuffix(mod, "/src") {
+			cands = append(cands, filepath.Join(mod, "..", "bin", "go"))
+		} else if strings.HasSuffix(mod, "/src/cmd") {
+			cands = append(cands, filepath.Join(mod, "..", "..", "bin", "go"))
+		} else {
+			toolGo := filepath.Join(mod, "tool", "go")
+			cands = append(cands, toolGo)
+		}
 	}
 	cands = append(cands,
 		filepath.Join(os.Getenv("HOME"), "sdk", "go", "bin", "go"),
