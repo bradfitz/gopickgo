@@ -1,3 +1,4 @@
 module github.com/bradfitz/gopickgo
 
-go 1.21.1
+// Intentionally ancient Go version to work with ancient distros (e.g. Ubuntu 22.04 LTS).
+go 1.18
