@@ -1,0 +1,46 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Build static binary
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          GOARCH=amd64 GOOS=linux go build -ldflags='-s -w' -o gopickgo-linux-amd64 .
+          GOARCH=arm64 GOOS=linux go build -ldflags='-s -w' -o gopickgo-linux-arm64 .
+      - name: Build .deb packages
+        run: |
+          for arch in amd64 arm64; do
+            dir="gopickgo_${GITHUB_REF_NAME#v}_${arch}"
+            mkdir -p "${dir}/DEBIAN" "${dir}/usr/local/bin"
+            cp "gopickgo-linux-${arch}" "${dir}/usr/local/bin/gopickgo"
+            chmod 755 "${dir}/usr/local/bin/gopickgo"
+            cat > "${dir}/DEBIAN/control" <<EOF
+          Package: gopickgo
+          Version: ${GITHUB_REF_NAME#v}
+          Architecture: ${arch}
+          Maintainer: Brad Fitzpatrick
+          Description: Picks the right Go binary based on your current directory
+          EOF
+            dpkg-deb --build "${dir}" "gopickgo_${GITHUB_REF_NAME#v}_${arch}.deb"
+          done
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            gopickgo-linux-amd64 \
+            gopickgo-linux-arm64 \
+            *.deb
