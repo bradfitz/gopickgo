@@ -39,6 +39,11 @@ func main() {
 }
 
 func findGo() (string, error) {
+	self, _ := os.Executable()
+	if self != "" {
+		self, _ = filepath.EvalSymlinks(self)
+	}
+
 	var cands []string
 	if mod, err := goModuleRoot(); err == nil {
 		if strings.HasSuffix(mod, "/src") {
@@ -61,6 +66,11 @@ func findGo() (string, error) {
 	)
 	for _, cand := range cands {
 		if _, err := os.Stat(cand); err == nil {
+			if self != "" {
+				if resolved, err := filepath.EvalSymlinks(cand); err == nil && resolved == self {
+					continue
+				}
+			}
 			return cand, nil
 		}
 	}
