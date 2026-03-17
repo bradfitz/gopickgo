@@ -6,12 +6,19 @@
 package main
 
 import (
+	"archive/tar"
+	"bufio"
+	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,7 +27,13 @@ import (
 func main() {
 	path, err := findGo()
 	if err != nil {
-		log.Fatalf("gopickgo: %v", err)
+		if installErr := installGo(); installErr != nil {
+			log.Fatalf("gopickgo: %v (install failed: %v)", err, installErr)
+		}
+		path, err = findGo()
+		if err != nil {
+			log.Fatalf("gopickgo: %v", err)
+		}
 	}
 	wantGofmt := len(os.Args) >= 1 && filepath.Base(os.Args[0]) == "gofmt"
 	if wantGofmt {
@@ -186,4 +199,145 @@ func goModuleRoot() (string, error) {
 		pwd = filepath.Dir(pwd)
 	}
 	return "", errors.New("no go.mod found")
+}
+
+func isInteractive() bool {
+	for _, f := range []*os.File{os.Stdin, os.Stderr} {
+		fi, err := f.Stat()
+		if err != nil {
+			return false
+		}
+		if fi.Mode()&os.ModeCharDevice == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func installGo() error {
+	if !isInteractive() {
+		return errors.New("no Go found and stdin is not a terminal")
+	}
+
+	version, err := latestGoVersion()
+	if err != nil {
+		return fmt.Errorf("finding latest Go version: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "No Go found. Install %s? [y/N] ", version)
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		return errors.New("no input")
+	}
+	answer := strings.TrimSpace(scanner.Text())
+	if answer != "y" && answer != "Y" {
+		return errors.New("install declined")
+	}
+
+	url := fmt.Sprintf("https://go.dev/dl/%s.%s-%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
+	fmt.Fprintf(os.Stderr, "Downloading %s ...\n", url)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("downloading Go: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("downloading Go: HTTP %s", resp.Status)
+	}
+
+	dest := filepath.Join(os.Getenv("HOME"), "sdk")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return err
+	}
+	if err := extractTarGz(resp.Body, dest, version); err != nil {
+		return fmt.Errorf("extracting to %s: %w", dest, err)
+	}
+	fmt.Fprintf(os.Stderr, "Installed to %s\n", filepath.Join(dest, version, "bin", "go"))
+	return nil
+}
+
+func latestGoVersion() (string, error) {
+	resp, err := http.Get("https://go.dev/dl/?mode=json")
+	if err != nil {
+		return "", fmt.Errorf("fetching go.dev/dl: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("fetching go.dev/dl: HTTP %s", resp.Status)
+	}
+	var releases []struct {
+		Version string `json:"version"`
+		Stable  bool   `json:"stable"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return "", fmt.Errorf("parsing go.dev/dl response: %w", err)
+	}
+	for _, r := range releases {
+		if r.Stable {
+			return r.Version, nil
+		}
+	}
+	return "", errors.New("no stable Go release found")
+}
+
+func extractTarGz(r io.Reader, destParent, dirRename string) error {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		name := hdr.Name
+		if dirRename != "" {
+			// Rewrite "go/" prefix to "{dirRename}/"
+			if strings.HasPrefix(name, "go/") {
+				name = dirRename + name[2:]
+			} else if name == "go" {
+				name = dirRename
+			}
+		}
+
+		target := filepath.Join(destParent, name)
+		if !strings.HasPrefix(target, destParent+string(filepath.Separator)) && target != destParent {
+			continue // skip entries that escape dest
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, os.FileMode(hdr.Mode)|0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			f.Close()
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			os.Remove(target)
+			if err := os.Symlink(hdr.Linkname, target); err != nil {
+				return err
+			}
+		}
+	}
 }
